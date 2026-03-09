@@ -1,0 +1,142 @@
+/* The Cat Guard - 猫卫士 暗色主题 */
+
+* {
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
+
+QMainWindow {
+    background-color: #1a1a2e;
+    color: #e0e0e0;
+}
+
+QWidget {
+    background-color: #1a1a2e;
+    color: #e0e0e0;
+}
+
+QLabel {
+    color: #e0e0e0;
+    background: transparent;
+}
+
+/* 标签页 */
+QTabWidget::pane {
+    border: none;
+    background: #1a1a2e;
+}
+
+QTabBar::tab {
+    background: #16213e;
+    color: #8892a8;
+    padding: 14px 30px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 3px;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+QTabBar::tab:selected {
+    background: #1a1a2e;
+    color: #4ecca3;
+    border-bottom: 3px solid #4ecca3;
+}
+
+QTabBar::tab:hover:!selected {
+    background: #1f2b47;
+    color: #b0b8c8;
+}
+
+/* 按钮 */
+QPushButton {
+    background-color: #16213e;
+    color: #e0e0e0;
+    border: 1px solid #2a3a5c;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 13px;
+}
+
+QPushButton:hover {
+    background-color: #1f2b47;
+    border-color: #4ecca3;
+    color: #ffffff;
+}
+
+QPushButton:pressed {
+    background-color: #0f1a30;
+}
+
+/* 日志区域 */
+QTextEdit {
+    background-color: #0d1117;
+    color: #58d68d;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    border: 1px solid #1e2d4a;
+    border-radius: 8px;
+    padding: 8px;
+    selection-background-color: #264f78;
+}
+
+/* 卡片框架 */
+QFrame {
+    background-color: #16213e;
+    border-radius: 12px;
+    border: 1px solid #1e2d4a;
+}
+
+/* 滚动条 */
+QScrollBar:vertical {
+    background: #0d1117;
+    width: 8px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background: #2a3a5c;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #4ecca3;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* 对话框 */
+QMessageBox {
+    background-color: #1a1a2e;
+}
+
+QMessageBox QLabel {
+    color: #e0e0e0;
+    font-size: 13px;
+}
+
+QMessageBox QPushButton {
+    min-width: 90px;
+    padding: 8px 16px;
+}
+
+/* 托盘菜单 */
+QMenu {
+    background-color: #16213e;
+    border: 1px solid #2a3a5c;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 8px 30px;
+    color: #e0e0e0;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background-color: #4ecca3;
+    color: #1a1a2e;
+}
