@@ -62,15 +62,23 @@ def load_config() -> dict:
             try:
                 with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                # 合并默认值（新增的配置项自动补全）
                 merged = {**_DEFAULT_CONFIG, **data}
                 _cache = merged
                 return merged.copy()
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"配置文件损坏，使用默认配置: {e}")
         _cache = _DEFAULT_CONFIG.copy()
-        save_config(_cache)
+        _write_file(_cache)
         return _cache.copy()
+
+
+def _write_file(config: dict):
+    """内部写文件（调用方需自行持有 _lock 或确保安全）"""
+    try:
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.error(f"保存配置失败: {e}")
 
 
 def save_config(config: dict):
@@ -78,12 +86,8 @@ def save_config(config: dict):
     global _cache
     with _lock:
         _ensure_dir()
-        try:
-            with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-            _cache = config.copy()
-        except OSError as e:
-            logger.error(f"保存配置失败: {e}")
+        _cache = config.copy()
+        _write_file(_cache)
 
 
 def get(key: str, default=None):
