@@ -1,5 +1,53 @@
 import sys
 import os
+import ctypes
+
+# ── 启动前自动请求管理员权限 ──
+def _ensure_admin():
+    """如果不是管理员，通过 UAC 重新以管理员身份启动自身，然后退出当前进程"""
+    try:
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return  # 已经是管理员
+    except Exception:
+        return
+
+    # 以管理员身份重新启动
+    python_exe = sys.executable
+    script = os.path.abspath(sys.argv[0])
+    params = " ".join(f'"{a}"' for a in sys.argv[1:])
+    try:
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", python_exe, f'"{script}" {params}'.strip(), None, 1
+        )
+        if ret > 32:  # ShellExecute 成功
+            sys.exit(0)
+    except Exception:
+        pass
+    # 如果 UAC 被拒绝或失败，继续以普通权限运行
+
+_ensure_admin()
+
+# ── 管理员 → SYSTEM 提权 ──
+def _try_elevate_to_system():
+    """如果已是管理员但不是 SYSTEM，尝试提权到 SYSTEM"""
+    if "--system-elevated" in sys.argv:
+        return  # 已经是 SYSTEM 提权后的进程，不再重复
+    try:
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            return  # 不是管理员，跳过
+        # 检查是否已经是 SYSTEM
+        if os.environ.get("USERNAME", "").upper() in ("SYSTEM", "СИСТЕМА"):
+            return
+        # 动态导入，避免循环依赖
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from core.utils import elevate_to_system
+        if elevate_to_system():
+            sys.exit(0)  # 新 SYSTEM 进程已启动，退出当前进程
+    except Exception:
+        pass  # 提权失败，继续以管理员权限运行
+
+_try_elevate_to_system()
+
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QFile, QTextStream, QSharedMemory
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
