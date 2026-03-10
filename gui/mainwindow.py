@@ -111,8 +111,13 @@ class MainWindow(QMainWindow):
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        icon_path = os.path.join(_BASE_DIR, "assets", "icon.png")
-        self.tray_icon.setIcon(QIcon(icon_path))
+        # 优先使用 .ico（Windows 托盘兼容性更好）
+        ico_path = os.path.join(_BASE_DIR, "assets", "icon.ico")
+        png_path = os.path.join(_BASE_DIR, "assets", "icon.png")
+        icon_path = ico_path if os.path.isfile(ico_path) else png_path
+        app_icon = QIcon(icon_path)
+        self.tray_icon.setIcon(app_icon)
+        self.setWindowIcon(app_icon)
         
         tray_menu = QMenu()
         
