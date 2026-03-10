@@ -3,3 +3,5 @@ psutil
 watchdog
 pywin32
 wmi
+pywintrace
+yara-python

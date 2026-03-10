@@ -11,6 +11,8 @@ from core.monitor import MonitorManager
 from core.utils import get_logger, is_admin
 from gui.dashboard import Dashboard
 from gui.tools import ToolsWidget
+from gui.settings import SettingsWidget
+from gui.security import SecurityWidget
 from gui.utils import QtLogHandler
 
 # Resolve asset paths relative to the application root
@@ -55,11 +57,15 @@ class MainWindow(QMainWindow):
         
         self.dashboard = Dashboard(self.monitor_manager)
         self.tools = ToolsWidget()
+        self.security = SecurityWidget()
+        self.settings = SettingsWidget()
         
         self.about = self._build_about_widget()
         
         self.tabs.addTab(self.dashboard, "🛡️ 仪表盘")
+        self.tabs.addTab(self.security, "🔍 安全扫描")
         self.tabs.addTab(self.tools, "🛠️ 系统修复")
+        self.tabs.addTab(self.settings, "⚙️ 设置")
         self.tabs.addTab(self.about, "ℹ️ 关于")
         
         main_layout.addWidget(self.tabs)
@@ -80,11 +86,11 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 22px; font-weight: bold; color: #4ecca3; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        ver = QLabel("版本 1.0.0")
+        ver = QLabel("版本 1.5.0")
         ver.setStyleSheet("font-size: 14px; color: #8892a8; background: transparent;")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        desc = QLabel("一款轻量级 Windows 主动防御与系统修复工具。\n实时监控启动项、进程、注册表和 USB 设备，\n帮助您抵御恶意软件的侵害。")
+        desc = QLabel("一款轻量级 Windows 主动防御与系统修复工具。\n实时监控启动项、进程、注册表、USB 和网络连接，\n支持 YARA 规则扫描、可疑文件隔离和白/黑名单配置。")
         desc.setStyleSheet("font-size: 13px; color: #b0b8c8; background: transparent;")
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc.setWordWrap(True)

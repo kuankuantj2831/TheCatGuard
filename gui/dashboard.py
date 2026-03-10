@@ -106,11 +106,13 @@ class Dashboard(QWidget):
         self.card_process = StatusCard("进程监控", "⚙️")
         self.card_registry = StatusCard("注册表监控", "🔑")
         self.card_usb = StatusCard("USB 监控", "🔌")
+        self.card_network = StatusCard("网络监控", "🌐")
 
         cards_layout.addWidget(self.card_file, 0, 0)
         cards_layout.addWidget(self.card_process, 0, 1)
         cards_layout.addWidget(self.card_registry, 0, 2)
         cards_layout.addWidget(self.card_usb, 0, 3)
+        cards_layout.addWidget(self.card_network, 0, 4)
 
         self._set_cards_status(False)
 
@@ -147,10 +149,10 @@ class Dashboard(QWidget):
 
     def _set_cards_status(self, running):
         if running:
-            for card in [self.card_file, self.card_process, self.card_registry, self.card_usb]:
+            for card in [self.card_file, self.card_process, self.card_registry, self.card_usb, self.card_network]:
                 card.set_value("运行中", "#4ecca3")
         else:
-            for card in [self.card_file, self.card_process, self.card_registry, self.card_usb]:
+            for card in [self.card_file, self.card_process, self.card_registry, self.card_usb, self.card_network]:
                 card.set_value("未启动", "#8892a8")
 
     def toggle_protection(self):
@@ -188,7 +190,7 @@ class Dashboard(QWidget):
                     QPushButton:pressed { background-color: #a93226; }
                 """)
                 self._set_cards_status(True)
-                self.add_log("防护已开启，正在监控进程、启动项、注册表和USB设备...")
+                self.add_log("防护已开启，正在监控进程、启动项、注册表、USB设备和网络连接...")
             except Exception as e:
                 self.add_log(f"启动防护失败：{e}")
 
