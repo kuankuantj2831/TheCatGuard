@@ -353,6 +353,15 @@ class USBMonitor:
                 f"{file_list}{extra}"
             )
 
+    def _reconnect_wmi(self):
+        """重新初始化 WMI 连接"""
+        try:
+            import wmi
+            self.wmi = wmi.WMI()
+            return True
+        except Exception:
+            return False
+
     def _monitor_loop(self):
         if not self.wmi:
             logger.error("USB Monitor: WMI not initialized, cannot monitor.")
@@ -365,7 +374,15 @@ class USBMonitor:
                 if d.Caption
             )
         except Exception as e:
-            logger.warning(f"USB Monitor: initial drive scan failed: {e}")
+            logger.warning(f"USB Monitor: 初始扫描失败: {e}，尝试重连...")
+            if self._reconnect_wmi():
+                try:
+                    known_drives = set(
+                        d.Caption for d in self.wmi.Win32_LogicalDisk(DriveType=2)
+                        if d.Caption
+                    )
+                except Exception:
+                    pass
 
         error_count = 0
         while self.running:
@@ -387,16 +404,36 @@ class USBMonitor:
                 error_count = 0
             except Exception as e:
                 error_count += 1
-                if error_count <= 3:
-                    logger.warning(f"USB Monitor error ({error_count}/3): {e}")
-                elif error_count == 4:
-                    logger.error("USB Monitor: repeated errors, suppressing further messages.")
+                if error_count == 1:
+                    logger.warning(f"USB Monitor: WMI 查询失败，尝试重连...")
+                    self._reconnect_wmi()
+                elif error_count == 3:
+                    logger.error("USB Monitor: 持续失败，已静默。将每30秒重试一次。")
+                # 失败多次后降低轮询频率
+                if error_count >= 3:
+                    time.sleep(30)
+                    continue
 
             time.sleep(3)
 
 
+# ─── 本地/私有地址，不应触发告警 ───
+import ipaddress as _ipaddress
+
+def _is_local_ip(ip_str):
+    """判断 IP 是否为回环或私有地址"""
+    try:
+        addr = _ipaddress.ip_address(ip_str)
+        return addr.is_loopback or addr.is_private or addr.is_link_local
+    except ValueError:
+        return False
+
+
 class NetworkMonitor:
     """网络连接监控：检测可疑外连"""
+
+    # 同一 (进程名, IP) 的告警冷却时间（秒）
+    _ALERT_COOLDOWN = 60
 
     @staticmethod
     def _safe_ports():
@@ -406,6 +443,7 @@ class NetworkMonitor:
         self.running = False
         self.thread = None
         self.known_conns = set()
+        self._alert_history = {}  # (name, ip) -> last_alert_time
 
     def start(self):
         self.running = True
@@ -432,6 +470,16 @@ class NetworkMonitor:
             pass
         return conns
 
+    def _should_alert(self, name, ip):
+        """同一 (进程, IP) 在冷却期内只告警一次"""
+        key = (name, ip)
+        now = time.time()
+        last = self._alert_history.get(key, 0)
+        if now - last < self._ALERT_COOLDOWN:
+            return False
+        self._alert_history[key] = now
+        return True
+
     def _monitor_loop(self):
         while self.running:
             try:
@@ -440,17 +488,21 @@ class NetworkMonitor:
                 for pid, ip, port in new_conns:
                     if not self.running:
                         break
+                    # 跳过本地回环和私有地址
+                    if _is_local_ip(ip):
+                        continue
                     try:
                         proc = psutil.Process(pid)
                         name = proc.name()
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         name = "unknown"
                     if config.is_ip_whitelisted(ip):
-                        pass  # 白名单 IP 跳过
-                    elif port not in self._safe_ports():
-                        logger.warning(
-                            f"SECURITY ALERT: 可疑网络连接 {name}(PID:{pid}) -> {ip}:{port}"
-                        )
+                        continue
+                    if port not in self._safe_ports():
+                        if self._should_alert(name, ip):
+                            logger.warning(
+                                f"SECURITY ALERT: 可疑网络连接 {name}(PID:{pid}) -> {ip}:{port}"
+                            )
                     else:
                         logger.debug(f"网络连接: {name}(PID:{pid}) -> {ip}:{port}")
                 self.known_conns = current
