@@ -17,9 +17,13 @@ def is_already_running():
     """检测是否已有实例在运行"""
     socket = QLocalSocket()
     socket.connectToServer(_APP_ID)
-    if socket.waitForConnected(500):
+    connected = socket.waitForConnected(200)
+    if connected:
         socket.disconnectFromServer()
         return True
+    socket.abort()
+    # 清理可能残留的无主服务器
+    QLocalServer.removeServer(_APP_ID)
     return False
 
 
@@ -40,13 +44,21 @@ def main():
     # 创建本地服务器，占住名称供后续实例检测
     server = QLocalServer()
     QLocalServer.removeServer(_APP_ID)  # 清理残留
-    server.listen(_APP_ID)
+    if not server.listen(_APP_ID):
+        # 监听失败也不阻止启动
+        print(f"Warning: QLocalServer listen failed: {server.errorString()}")
 
     # Load Styles
     load_stylesheet(app)
     
-    window = MainWindow()
-    window.show()
+    try:
+        window = MainWindow()
+        window.show()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        QMessageBox.critical(None, "猫卫士 - 启动错误", f"启动失败:\n{e}")
+        sys.exit(1)
     
     sys.exit(app.exec())
 
