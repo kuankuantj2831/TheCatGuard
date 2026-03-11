@@ -82,9 +82,17 @@ class QuarantineManager:
             logger.error(f"隔离文件失败 {filepath}: {e}")
             return False
 
+    # 禁止恢复到的系统关键目录
+    _BLOCKED_RESTORE_DIRS = [
+        os.path.normcase(r"C:\Windows"),
+        os.path.normcase(r"C:\Program Files"),
+        os.path.normcase(r"C:\Program Files (x86)"),
+    ]
+
     def restore_file(self, qid: str) -> bool:
         """
         从隔离区恢复文件到原始位置。
+        禁止恢复到系统关键目录，防止路径穿越攻击。
         """
         entry = self._find_entry(qid)
         if not entry:
@@ -92,7 +100,19 @@ class QuarantineManager:
             return False
 
         src = os.path.join(self._qdir, entry["quarantine_name"])
-        dest = entry["original_path"]
+        dest = os.path.normpath(entry["original_path"])
+
+        # 安全检查：禁止恢复到系统目录
+        dest_norm = os.path.normcase(dest)
+        for blocked in self._BLOCKED_RESTORE_DIRS:
+            if dest_norm.startswith(blocked):
+                logger.warning(f"安全拦截：禁止恢复文件到系统目录 {dest}")
+                return False
+
+        # 安全检查：禁止路径穿越（.. 组件）
+        if ".." in dest.split(os.sep):
+            logger.warning(f"安全拦截：恢复路径包含路径穿越 {dest}")
+            return False
 
         if not os.path.isfile(src):
             logger.error(f"隔离文件丢失: {src}")

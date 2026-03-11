@@ -59,11 +59,11 @@ def restart_as_admin():
     # 获取当前 Python解释器路径和脚本路径
     python_exe = sys.executable
     script_path = sys.argv[0]
-    params = " ".join(sys.argv[1:])
+    params = " ".join(f'"{a}"' for a in sys.argv[1:])
     
     try:
         ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", python_exe, f'"{script_path}" {params}', None, 1
+            None, "runas", python_exe, f'"{script_path}" {params}'.strip(), None, 1
         )
         sys.exit(0)
     except Exception as e:
@@ -123,9 +123,43 @@ def disable_autostart():
 # ─── SYSTEM 提权 ───
 
 def is_system():
-    """检查当前是否以 SYSTEM 身份运行"""
+    """检查当前是否以 SYSTEM 身份运行（通过 Windows API 获取令牌 SID）"""
     try:
-        return os.environ.get("USERNAME", "").upper() in ("SYSTEM", "СИСТЕМА")
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.windll.advapi32
+        kernel32 = ctypes.windll.kernel32
+
+        TOKEN_QUERY = 0x0008
+        TokenUser = 1
+        h_token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(h_token)
+        ):
+            return False
+        try:
+            # 获取 TOKEN_USER 所需缓冲区大小
+            buf_size = wintypes.DWORD(0)
+            advapi32.GetTokenInformation(h_token, TokenUser, None, 0, ctypes.byref(buf_size))
+            buf = ctypes.create_string_buffer(buf_size.value)
+            if not advapi32.GetTokenInformation(
+                h_token, TokenUser, buf, buf_size, ctypes.byref(buf_size)
+            ):
+                return False
+            # TOKEN_USER 结构体的前 sizeof(c_void_p) 字节是 SID 指针
+            sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            # 转换 SID 为字符串
+            sid_str = ctypes.c_wchar_p()
+            if not advapi32.ConvertSidToStringSidW(
+                ctypes.c_void_p(sid_ptr), ctypes.byref(sid_str)
+            ):
+                return False
+            result = str(sid_str.value)
+            kernel32.LocalFree(sid_str)
+            # S-1-5-18 是 SYSTEM 的 Well-Known SID
+            return result == "S-1-5-18"
+        finally:
+            kernel32.CloseHandle(h_token)
     except Exception:
         return False
 
@@ -147,10 +181,18 @@ def elevate_to_system():
         # 找到 winlogon.exe 的 PID
         import psutil
         winlogon_pid = None
-        for proc in psutil.process_iter(['name', 'pid']):
+        for proc in psutil.process_iter(['name', 'pid', 'exe']):
             if proc.info['name'] and proc.info['name'].lower() == 'winlogon.exe':
-                winlogon_pid = proc.info['pid']
-                break
+                # 验证路径必须在 System32，防止伪造进程
+                try:
+                    exe_path = proc.info.get('exe', '') or ''
+                    if os.path.normcase(os.path.normpath(exe_path)).startswith(
+                        os.path.normcase(r'C:\Windows\System32')
+                    ):
+                        winlogon_pid = proc.info['pid']
+                        break
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
 
         if not winlogon_pid:
             return False

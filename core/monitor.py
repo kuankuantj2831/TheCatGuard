@@ -97,6 +97,20 @@ class ProcessMonitor:
         self._etw_session = None
         self.known_pids = set()
 
+    @staticmethod
+    def _terminate_process(pid, name=""):
+        """强制终止可疑进程"""
+        try:
+            p = psutil.Process(pid)
+            p.kill()
+            logger.warning(f"DEFENSE: 已击杀可疑进程 {name}(PID:{pid})")
+        except psutil.NoSuchProcess:
+            pass  # 进程已经退出
+        except psutil.AccessDenied:
+            logger.error(f"DEFENSE: 无权击杀进程 {name}(PID:{pid})，权限不足")
+        except Exception as e:
+            logger.error(f"DEFENSE: 击杀进程失败 {name}(PID:{pid}): {e}")
+
     def start(self):
         self.running = True
         if _ETW_AVAILABLE:
@@ -123,13 +137,20 @@ class ProcessMonitor:
     def _etw_callback(self, event_tuples, context):
         for ev in event_tuples:
             try:
-                d = dict(ev) if not isinstance(ev, dict) else ev
-                image = d.get('ImageName', '')
+                if isinstance(ev, dict):
+                    d = ev
+                elif hasattr(ev, 'items'):
+                    d = dict(ev)
+                elif hasattr(ev, '__getitem__'):
+                    d = dict(ev)
+                else:
+                    continue
+                image = str(d.get('ImageName', '') or '')
                 pid = d.get('ProcessID', '?')
-                name = os.path.basename(str(image)).lower()
+                name = os.path.basename(image).lower()
                 if not name:
                     continue
-                alert = self._check_image(name, str(image), pid)
+                alert = self._check_image(name, image, pid)
                 if alert:
                     logger.warning(alert)
             except Exception:
@@ -156,13 +177,14 @@ class ProcessMonitor:
             self.thread.join(timeout=1.0)
 
     def _check_image(self, name, exe_path, pid):
-        """检查进程路径是否可疑"""
+        """检查进程路径是否可疑，黑名单进程直接击杀"""
         # 白名单跳过
         if config.is_process_whitelisted(name) or config.is_path_whitelisted(exe_path):
             return None
-        # 黑名单直接告警
+        # 黑名单直接击杀 + 告警
         if config.is_process_blacklisted(name):
-            return f"SECURITY ALERT: 黑名单进程已启动 {name} (PID:{pid}): {exe_path}"
+            self._terminate_process(pid, name)
+            return f"SECURITY ALERT: 黑名单进程已击杀 {name} (PID:{pid}): {exe_path}"
         if name in _SYSTEM_PROCESS_PATHS:
             exe_norm = os.path.normcase(os.path.normpath(exe_path))
             if not any(exe_norm.startswith(os.path.normcase(p)) for p in _SYSTEM_PROCESS_PATHS[name]):
@@ -199,6 +221,7 @@ class ProcessMonitor:
             except Exception as e:
                 logger.error(f"Process monitor error: {e}")
             time.sleep(interval)
+        logger.debug("进程监控轮询线程已退出")
 
 
 class RegistryMonitor:
@@ -463,9 +486,11 @@ class NetworkMonitor:
     def _get_connections(self):
         conns = set()
         try:
+            # 监控 TCP ESTABLISHED + UDP 连接
             for c in psutil.net_connections(kind='inet'):
-                if c.status == 'ESTABLISHED' and c.raddr:
-                    conns.add((c.pid, c.raddr.ip, c.raddr.port))
+                if c.raddr:
+                    if c.status == 'ESTABLISHED' or c.type == 2:  # 2 = SOCK_DGRAM (UDP)
+                        conns.add((c.pid, c.raddr.ip, c.raddr.port))
         except (psutil.AccessDenied, OSError):
             pass
         return conns
@@ -526,11 +551,18 @@ class MonitorManager:
             return
         self._running = True
         logger.info("Starting all monitors...")
-        self.file_monitor.start()
-        self.process_monitor.start()
-        self.registry_monitor.start()
-        self.usb_monitor.start()
-        self.network_monitor.start()
+        monitors = [
+            ("file", self.file_monitor),
+            ("process", self.process_monitor),
+            ("registry", self.registry_monitor),
+            ("usb", self.usb_monitor),
+            ("network", self.network_monitor),
+        ]
+        for name, mon in monitors:
+            try:
+                mon.start()
+            except Exception as e:
+                logger.error(f"{name} monitor 启动失败: {e}")
         logger.info("All monitors started.")
 
     def stop_all(self):
@@ -538,26 +570,25 @@ class MonitorManager:
             return
         self._running = False
         logger.info("Stopping all monitors...")
-        try:
-            self.process_monitor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping process monitor: {e}")
-        try:
-            self.registry_monitor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping registry monitor: {e}")
-        try:
-            self.usb_monitor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping USB monitor: {e}")
-        try:
-            self.file_monitor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping file monitor: {e}")
-        try:
-            self.network_monitor.stop()
-        except Exception as e:
-            logger.error(f"Error stopping network monitor: {e}")
+        monitors = [
+            ("process", self.process_monitor),
+            ("registry", self.registry_monitor),
+            ("usb", self.usb_monitor),
+            ("file", self.file_monitor),
+            ("network", self.network_monitor),
+        ]
+        for name, mon in monitors:
+            try:
+                mon.stop()
+            except Exception as e:
+                logger.error(f"Error stopping {name} monitor: {e}")
+        # 确保所有监控线程在超时内退出
+        for name, mon in monitors:
+            t = getattr(mon, 'thread', None)
+            if t and t.is_alive():
+                t.join(timeout=3.0)
+                if t.is_alive():
+                    logger.warning(f"{name} monitor 线程未能在超时内退出")
         logger.info("All monitors stopped.")
 
     @property

@@ -237,11 +237,13 @@ class SettingsWidget(QWidget):
         cfg["registry_poll_interval"] = self.spin_registry.value()
         cfg["network_poll_interval"] = self.spin_network.value()
 
-        # 安全端口：过滤非数字
+        # 安全端口：过滤非数字和无效范围
         ports = []
         for p in self.safe_ports_editor.get_items():
             try:
-                ports.append(int(p))
+                port = int(p)
+                if 0 < port <= 65535:
+                    ports.append(port)
             except ValueError:
                 pass
         cfg["safe_ports"] = ports
@@ -250,7 +252,13 @@ class SettingsWidget(QWidget):
         cfg["whitelist_paths"] = self.wl_path.get_items()
         cfg["whitelist_network_ips"] = self.wl_ip.get_items()
         cfg["blacklist_processes"] = self.bl_process.get_items()
-        cfg["blacklist_hashes"] = self.bl_hash.get_items()
+        # SHA256 黑名单：验证格式
+        valid_hashes = []
+        for h in self.bl_hash.get_items():
+            h = h.strip().lower()
+            if len(h) == 64 and all(c in '0123456789abcdef' for c in h):
+                valid_hashes.append(h)
+        cfg["blacklist_hashes"] = valid_hashes
         cfg["yara_enabled"] = self.chk_yara.isChecked()
         cfg["yara_rules_dir"] = self.yara_dir_input.text().strip()
         cfg["quarantine_auto"] = self.chk_auto_quarantine.isChecked()
