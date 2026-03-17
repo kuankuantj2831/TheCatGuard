@@ -192,6 +192,29 @@ class SettingsWidget(QWidget):
         qg.addWidget(self.chk_auto_quarantine)
         layout.addWidget(q_group)
 
+        # ── 360 沙箱云 ──
+        sandbox_group = QGroupBox("📡 360 沙箱云")
+        sandbox_group.setStyleSheet(self._group_style())
+        sbg = QVBoxLayout(sandbox_group)
+
+        self.chk_sandbox_enabled = QCheckBox("启用 360 沙箱云 API 动态分析")
+        self.chk_sandbox_enabled.setStyleSheet("color: #e0e0e0; background: transparent;")
+        sbg.addWidget(self.chk_sandbox_enabled)
+
+        self.chk_sandbox_auto_submit = QCheckBox("检出高危文件自动提交沙箱")
+        self.chk_sandbox_auto_submit.setStyleSheet("color: #e0e0e0; background: transparent;")
+        sbg.addWidget(self.chk_sandbox_auto_submit)
+
+        self.chk_sandbox_wait = QCheckBox("等待沙箱分析完成（可能较慢）")
+        self.chk_sandbox_wait.setStyleSheet("color: #e0e0e0; background: transparent;")
+        sbg.addWidget(self.chk_sandbox_wait)
+
+        info_label = QLabel("ℹ 需要 360 沙箱云 API Key")
+        info_label.setStyleSheet("color: #6b7b9e; font-size: 10px; background: transparent;")
+        sbg.addWidget(info_label)
+
+        layout.addWidget(sandbox_group)
+
         # ── 保存按钮 ──
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -230,6 +253,10 @@ class SettingsWidget(QWidget):
         self.chk_yara.setChecked(cfg.get("yara_enabled", True))
         self.yara_dir_input.setText(cfg.get("yara_rules_dir", ""))
         self.chk_auto_quarantine.setChecked(cfg.get("quarantine_auto", False))
+        # 360 沙箱云配置
+        self.chk_sandbox_enabled.setChecked(cfg.get("sandbox360.enabled", False))
+        self.chk_sandbox_auto_submit.setChecked(cfg.get("sandbox360.auto_submit_critical", True))
+        self.chk_sandbox_wait.setChecked(cfg.get("sandbox360.wait_report", False))
 
     def _save(self):
         cfg = config.load_config()
@@ -262,6 +289,10 @@ class SettingsWidget(QWidget):
         cfg["yara_enabled"] = self.chk_yara.isChecked()
         cfg["yara_rules_dir"] = self.yara_dir_input.text().strip()
         cfg["quarantine_auto"] = self.chk_auto_quarantine.isChecked()
+        # 360 沙箱云配置
+        cfg["sandbox360.enabled"] = self.chk_sandbox_enabled.isChecked()
+        cfg["sandbox360.auto_submit_critical"] = self.chk_sandbox_auto_submit.isChecked()
+        cfg["sandbox360.wait_report"] = self.chk_sandbox_wait.isChecked()
 
         config.save_config(cfg)
         QMessageBox.information(self, "设置", "设置已保存。\n部分设置将在下次启动防护时生效。")
