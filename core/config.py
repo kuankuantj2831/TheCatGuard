@@ -44,12 +44,74 @@ _DEFAULT_CONFIG = {
     "yara_enabled": True,
     "yara_rules_dir": "",            # 空 = 使用内置规则目录
 
+    # ── 云查杀（向360学习） ──
+    "cloud_scanner": {
+        "enabled": False,            # 是否启用云查杀
+        "api_key": "",               # VirusTotal API密钥
+    },
+
+    # ── 行为启发式检测 ──
+    "heuristic_detection": {
+        "enabled": True,             # 是否启用行为评分
+        "risk_threshold": 50,        # 风险阈值（0-100）
+    },
+
+    # ── 进程注入检测 ──
+    "injection_detection": {
+        "enabled": True,             # 是否启用注入检测
+    },
+
     # ── 隔离区 ──
     "quarantine_dir": "",            # 空 = 使用默认目录
     "quarantine_auto": False,        # 是否自动隔离可疑文件
 
+    # ── 360 沙箱云 ──
+    "sandbox360.enabled": False,        # 是否启用 360 沙箱云提交
+    "sandbox360.auto_submit_critical": True,  # 检出高危文件是否自动提交
+    "sandbox360.wait_report": False,   # 是否等待完整报告（可能耗时较长）
+
     # ── 通知 ──
     "notification_level": "medium",  # low / medium / high
+    
+    # ── 行为分析 ──
+    "behavioral_analysis": {
+        "enabled": True,             # 是否启用行为分析
+        "anomaly_threshold": 70,     # 异常评分阈值（0-100）
+        "max_history": 1000,         # 进程行为历史记录数
+    },
+    
+    # ── 网络安全防护 ──
+    "network_security": {
+        "enabled": True,             # 是否启用网络防护
+        "firewall_enabled": True,    # 是否启用防火墙
+        "port_scan_detection": True, # 端口扫描检测
+        "ddos_detection": True,      # DDoS检测
+        "dns_tunneling_detection": True,  # DNS隧道检测
+    },
+    
+    # ── 隐私保护 ──
+    "privacy_protection": {
+        "enabled": True,             # 是否启用隐私保护
+        "auto_cleanup": False,       # 是否自动清理隐私数据
+        "cleanup_browsers": True,    # 清理浏览器数据
+        "cleanup_temps": True,       # 清理临时文件
+        "cleanup_registry": True,    # 清理注册表痕迹
+    },
+    
+    # ── 数据加密 ──
+    "data_encryption": {
+        "enabled": False,            # 是否启用数据加密功能
+        "auto_encrypt_sensitive": False,  # 是否自动加密敏感文件
+        "sensitive_extensions": [".key", ".pem", ".pfx", ".sql"],
+    },
+    
+    # ── 性能监控 ──
+    "performance_monitoring": {
+        "enabled": True,             # 是否启用性能监控
+        "cpu_threshold": 80,         # CPU使用率警告阈值（%）
+        "memory_threshold": 80,      # 内存使用率警告阈值（%）
+        "sample_interval": 1,        # 采样间隔（秒）
+    },
 }
 
 _lock = threading.Lock()

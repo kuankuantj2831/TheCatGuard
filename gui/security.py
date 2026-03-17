@@ -12,6 +12,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from core.yara_scanner import YaraScanner
 from core.quarantine import QuarantineManager
+from core.sandbox360 import get_sandbox, is_sandbox_available
 from core import config
 
 
@@ -190,18 +191,62 @@ class ScanWidget(QWidget):
         sev_item.setForeground(Qt.GlobalColor.white)
         self.result_table.setItem(row, 2, sev_item)
 
-        # 隔离按钮
-        q_btn = QPushButton("隔离")
-        q_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        q_btn.setStyleSheet(
-            "QPushButton { background-color: #e74c3c; color: white; border: none; "
-            "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
-            "QPushButton:hover { background-color: #c0392b; }"
-        )
-        filepath = result["file"]
-        rule = result["rule"]
-        q_btn.clicked.connect(lambda checked, f=filepath, r=rule: self._quarantine_file(f, r))
-        self.result_table.setCellWidget(row, 3, q_btn)
+        # 沙箱提交按钮（若启用）
+        if config.get("sandbox360.enabled", False):
+            sand_btn = QPushButton("沙箱")
+            sand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            sand_btn.setStyleSheet(
+                "QPushButton { background-color: #3498db; color: white; border: none; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #2980b9; }"
+            )
+            filepath = result["file"]
+            sand_btn.clicked.connect(lambda checked, f=filepath: self._submit_to_sandbox(f))
+        else:
+            sand_btn = None
+
+        # 隔离按钮和沙箱按钮
+        if config.get("sandbox360.enabled", False):
+            sand_btn = QPushButton("沙箱")
+            sand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            sand_btn.setStyleSheet(
+                "QPushButton { background-color: #3498db; color: white; border: none; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #2980b9; }"
+            )
+            filepath = result["file"]
+            sand_btn.clicked.connect(lambda checked, f=filepath: self._submit_to_sandbox(f))
+            
+            q_btn = QPushButton("隔离")
+            q_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            q_btn.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; border: none; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #c0392b; }"
+            )
+            filepath = result["file"]
+            rule = result["rule"]
+            q_btn.clicked.connect(lambda checked, f=filepath, r=rule: self._quarantine_file(f, r))
+            
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(2, 0, 2, 0)
+            cell_layout.setSpacing(3)
+            cell_layout.addWidget(sand_btn)
+            cell_layout.addWidget(q_btn)
+            self.result_table.setCellWidget(row, 3, cell_widget)
+        else:
+            q_btn = QPushButton("隔离")
+            q_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            q_btn.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; border: none; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #c0392b; }"
+            )
+            filepath = result["file"]
+            rule = result["rule"]
+            q_btn.clicked.connect(lambda checked, f=filepath, r=rule: self._quarantine_file(f, r))
+            self.result_table.setCellWidget(row, 3, q_btn)
 
     def _on_finished(self, count):
         self.scan_btn.setEnabled(True)
@@ -222,6 +267,25 @@ class ScanWidget(QWidget):
             QMessageBox.information(self, "隔离", f"文件已隔离:\n{os.path.basename(filepath)}")
         else:
             QMessageBox.warning(self, "失败", f"隔离失败:\n{filepath}")
+
+    def _submit_to_sandbox(self, filepath):
+        """提交文件到 360 沙箱云"""
+        if not is_sandbox_available():
+            QMessageBox.warning(self, "不可用", "360 沙箱云 API 暂不可用。")
+            return
+
+        sandbox = get_sandbox()
+        task_id = sandbox.submit_file(filepath)
+        if task_id:
+            # 异步查询报告
+            self.status_label.setText(f"已提交沙箱: {os.path.basename(filepath)} (任务: {task_id})")
+            QMessageBox.information(
+                self, "提交成功",
+                f"文件已提交至 360 沙箱云\n任务ID: {task_id}\n"
+                f"可在设置中查看沙箱报告结果。"
+            )
+        else:
+            QMessageBox.warning(self, "提交失败", f"无法提交文件到沙箱:\n{filepath}")
 
     @staticmethod
     def _btn_style(bg, hover, text_color="#e0e0e0"):
