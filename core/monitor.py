@@ -7,6 +7,8 @@ from watchdog.events import FileSystemEventHandler
 import os
 from .utils import get_logger, is_admin
 from . import config
+from .heuristic_detector import BehavioralHeuristicDetector
+from .process_injection_detector import ProcessInjectionDetector
 
 logger = get_logger()
 
@@ -96,6 +98,9 @@ class ProcessMonitor:
         self.thread = None
         self._etw_session = None
         self.known_pids = set()
+        # 向360学习：添加行为启发式和注入检测
+        self.heuristic_detector = BehavioralHeuristicDetector()
+        self.injection_detector = ProcessInjectionDetector()
 
     @staticmethod
     def _terminate_process(pid, name=""):
@@ -198,7 +203,35 @@ class ProcessMonitor:
 
     def _check_process(self, proc):
         try:
-            return self._check_image(proc.name().lower(), proc.exe(), proc.pid)
+            name = proc.name().lower()
+            exe_path = proc.exe()
+            pid = proc.pid
+
+            # 基础路径检查
+            alert = self._check_image(name, exe_path, pid)
+            if alert:
+                return alert
+
+            # 向360学习：行为启发式检测
+            if config.get("heuristic_detection.enabled", True):
+                risk_score, behaviors = self.heuristic_detector.score_process_behavior(pid, name)
+                threshold = config.get("heuristic_detection.risk_threshold", 50)
+                if risk_score >= threshold:
+                    behaviors_str = ", ".join(behaviors) if behaviors else "未知行为"
+                    logger.warning(
+                        f"SECURITY ALERT: 进程行为可疑 {name}(PID:{pid}) - 风险评分:{risk_score}/100, 触发行为:{behaviors_str}"
+                    )
+
+            # 向360学习：进程注入检测
+            if config.get("injection_detection.enabled", True):
+                suspicious_injections = self.injection_detector.detect_remote_thread_injection(pid)
+                if suspicious_injections:
+                    for inj in suspicious_injections:
+                        logger.critical(
+                            f"SECURITY ALERT: 检测到进程注入 {name}(PID:{pid}) <- {inj['source_name']}(PID:{inj['source_pid']}) - {inj['reason']}"
+                        )
+
+            return None
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             return None
 

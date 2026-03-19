@@ -9,10 +9,11 @@ from PyQt6.QtGui import QIcon, QAction
 
 from core.monitor import MonitorManager
 from core.utils import get_logger, is_admin
-from gui.dashboard import Dashboard
+from gui.enhanced_dashboard import EnhancedDashboard
 from gui.tools import ToolsWidget
 from gui.settings import SettingsWidget
 from gui.security import SecurityWidget
+from gui.advanced_features import AdvancedFeaturesPanel
 from gui.utils import QtLogHandler
 
 # Resolve asset paths relative to the application root
@@ -55,16 +56,18 @@ class MainWindow(QMainWindow):
         
         self.tabs = QTabWidget()
         
-        self.dashboard = Dashboard(self.monitor_manager)
+        self.dashboard = EnhancedDashboard(self.monitor_manager)
         self.tools = ToolsWidget()
         self.security = SecurityWidget()
         self.settings = SettingsWidget()
+        self.advanced = AdvancedFeaturesPanel()
         
         self.about = self._build_about_widget()
         
         self.tabs.addTab(self.dashboard, "🛡️ 仪表盘")
         self.tabs.addTab(self.security, "🔍 安全扫描")
         self.tabs.addTab(self.tools, "🛠️ 系统修复")
+        self.tabs.addTab(self.advanced, "🚀 高级功能")
         self.tabs.addTab(self.settings, "⚙️ 设置")
         self.tabs.addTab(self.about, "ℹ️ 关于")
         

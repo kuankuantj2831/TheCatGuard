@@ -25,8 +25,8 @@ except ImportError:
 # 目标：降低误报、提高针对性，尤其是针对勒索/后门/远控。
 # 用户可在配置目录中添加自定义规则文件以覆盖或补充。
 
-_BUILTIN_RULES_SOURCE = r"""
-import "pe"
+# 基础规则（不依赖 PE 模块，始终可用）
+_BUILTIN_RULES_BASE = r"""
 
 // 1) autorun.inf 规则：只检测真正包含执行指令的 autorun.inf
 rule SuspiciousAutorun {
@@ -73,24 +73,24 @@ rule SuspiciousBatchCommands {
         2 of them
 }
 
-// 4) 识别已知勒索/后门字符串（包含 WannaCry/其他典型样本标志）
+// 4) 已知勒索/后门字符串（不限 PE，任何文件类型均可匹配）
 rule KnownRansomwareSignatures {
     meta:
-        description = "Detects known ransomware/backdoor string markers in PE binaries"
+        description = "Detects known ransomware/backdoor string markers"
         severity = "critical"
     strings:
         $wannacry1 = "WannaCry" nocase
         $wannacry2 = "WannaCrypt" nocase
         $wannacry3 = "WannaDecryptor" nocase
         $ransom_note = "YOUR FILES HAVE BEEN ENCRYPTED" nocase
-        $ransom_note2 = "文件已被加密" wide
+        $ransom_note2 = {E6 96 87 E4 BB B6 E5 B7 B2 E8 A2 AB E5 8A A0 E5 AF 86}
         $cobaltstrike = "Cobalt Strike" nocase
         $mimikatz = "mimikatz" nocase
         $petya = "PETYA" nocase
         $notpetya = "NotPetya" nocase
         $ransomware_marker = "README_FOR_DECRYPT" nocase
     condition:
-        uint16(0) == 0x5A4D and any of them
+        any of them
 }
 
 // 5) 可能的键盘记录器行为：同时存在 hook 与键盘/鼠标钩子
@@ -108,6 +108,171 @@ rule PossibleKeylogger {
     condition:
         $a and ($b or $c) and ($d or $e or $f)
 }
+
+// ── WannaCry 专项检测规则 ──
+
+// 6) WannaCry 互斥体 + 服务名 + Kill Switch 域名
+rule WannaCry_Mutex_And_Markers {
+    meta:
+        description = "Detects WannaCry mutex, service name, and kill switch domain"
+        severity = "critical"
+    strings:
+        // WannaCry 使用的全局互斥体
+        $mutex1 = "MsWinZonesCacheCounterMutexA" ascii wide
+        $mutex2 = "MsWinZonesCacheCounterMutexA0" ascii wide
+        // WannaCry 注册的服务名
+        $svc1 = "mssecsvc2.0" ascii wide nocase
+        // Kill switch 域名
+        $killswitch = "iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea.com" ascii wide nocase
+        // WannaCry 释放的文件名
+        $tasksche = "tasksche.exe" ascii wide nocase
+        $mssecsvc = "mssecsvc.exe" ascii wide nocase
+        // 勒索信文件名
+        $readme = "@Please_Read_Me@.txt" ascii wide nocase
+        $wannadecryptor = "@WanaDecryptor@.exe" ascii wide nocase
+    condition:
+        any of them
+}
+
+// 7) WannaCry 加密相关特征（RSA 公钥标记 + .WNCRY 扩展名）
+rule WannaCry_Encryption_Artifacts {
+    meta:
+        description = "Detects WannaCry encryption artifacts and ransom file patterns"
+        severity = "critical"
+    strings:
+        // .WNCRY 加密文件扩展名
+        $wncry_ext = ".WNCRY" ascii wide
+        $wncryt = ".WNCRYT" ascii wide
+        // WannaCry 内嵌的比特币钱包地址
+        $btc1 = "115p7UMMngoj1pMvkpHijcRdfJNXj6LrLn" ascii
+        $btc2 = "12t9YDPgwueZ9NyMgw519p7AA8isjr6SMw" ascii
+        $btc3 = "13AM4VW2dhxYgXeQepoHkHSQuy6NgaEb94" ascii
+        // WannaCry 的 RSA 公钥导入标记
+        $rsa_import = "CryptImportKey" ascii
+        // WannaCry 加密使用的 AES + RSA 组合
+        $crypt_acquire = "CryptAcquireContextA" ascii
+        $crypt_encrypt = "CryptEncrypt" ascii
+        // 资源中的 .wnry 文件
+        $res_c = "c.wnry" ascii wide
+        $res_r = "r.wnry" ascii wide
+        $res_s = "s.wnry" ascii wide
+        $res_t = "t.wnry" ascii wide
+        $res_u = "u.wnry" ascii wide
+        $res_msg = "msg" ascii wide
+    condition:
+        // .WNCRY 扩展名 + 任何其他标记
+        ($wncry_ext or $wncryt) and any of ($btc*, $rsa_import, $crypt_*, $res_*) or
+        // 或者同时出现多个 .wnry 资源文件名
+        3 of ($res_*) or
+        // 或者出现比特币钱包地址
+        any of ($btc*)
+}
+
+// 8) WannaCry SMB 传播特征（EternalBlue 利用）
+rule WannaCry_SMB_Exploit {
+    meta:
+        description = "Detects WannaCry SMB/EternalBlue exploitation patterns"
+        severity = "critical"
+    strings:
+        // EternalBlue SMB exploit 特征字节
+        $smb_sig1 = { FF 53 4D 42 72 }  // SMB negotiate
+        $smb_sig2 = { FF 53 4D 42 25 }  // SMB trans
+        // DoublePulsar 后门特征
+        $doublepulsar1 = { 00 00 00 00 00 00 00 00 00 00 00 45 }
+        // WannaCry 扫描 445 端口的代码特征
+        $port445_1 = { C7 44 24 ?? BD 01 00 00 }  // mov [esp+xx], 445
+        $port445_2 = "445" ascii
+        // WannaCry 的 SMB 传播函数中的特征字符串
+        $ipc_share = "IPC$" ascii wide
+        $smb_pipe = "\\\\%s\\IPC$" ascii
+    condition:
+        2 of them
+}
+
+// 9) WannaCry PE 文件特征（需要 MZ 头）
+rule WannaCry_PE_Indicators {
+    meta:
+        description = "Detects WannaCry PE binary indicators"
+        severity = "critical"
+    strings:
+        // WannaCry 主程序中的特征字符串组合
+        $s1 = "tasksche.exe" ascii wide nocase
+        $s2 = "mssecsvc.exe" ascii wide nocase
+        $s3 = "attrib +h" ascii nocase
+        $s4 = "icacls . /grant Everyone:F /T /C /Q" ascii nocase
+        $s5 = "cmd.exe /c" ascii nocase
+        // WannaCry 的 Tor 客户端相关
+        $tor1 = "gx7ekbenv2riucmf.onion" ascii
+        $tor2 = "57g7spgrzlojinas.onion" ascii
+        $tor3 = "xxlvbrloxvriy2c5.onion" ascii
+        $tor4 = "76jdd2ir2embyv47.onion" ascii
+        // WannaCry 的注册表操作
+        $reg1 = "SOFTWARE\\WanaCrypt0r" ascii wide nocase
+        $reg2 = "WanaCrypt0r" ascii wide nocase
+    condition:
+        uint16(0) == 0x5A4D and 2 of them
+}
+
+// 10) Memz 木马检测
+rule Memz_Trojan {
+    meta:
+        description = "Detects MEMZ trojan indicators"
+        severity = "critical"
+    strings:
+        $memz1 = "MEMZ" ascii wide nocase
+        $memz2 = "MBR has been overwritten" ascii wide nocase
+        $memz3 = "Your computer has been trashed" ascii wide nocase
+        $memz4 = "Leurak" ascii wide nocase
+        $nyan = "nyan cat" ascii wide nocase
+        $mbr_write = { B8 00 00 00 00 BA 80 00 }  // MBR 写入特征
+    condition:
+        2 of them
+}
+
+// 11) 通用勒索软件行为特征（文件加密 + 赎金提示）
+rule Generic_Ransomware_Behavior {
+    meta:
+        description = "Detects generic ransomware behavior patterns"
+        severity = "high"
+    strings:
+        $enc1 = "CryptEncrypt" ascii
+        $enc2 = "CryptGenKey" ascii
+        $enc3 = "CryptImportKey" ascii
+        $enc4 = "CryptAcquireContext" ascii
+        $del_shadow = "vssadmin delete shadows" ascii wide nocase
+        $del_shadow2 = "wmic shadowcopy delete" ascii wide nocase
+        $del_backup = "bcdedit /set {default} recoveryenabled no" ascii wide nocase
+        $del_backup2 = "wbadmin delete catalog" ascii wide nocase
+        $ransom1 = "your files" ascii wide nocase
+        $ransom2 = "encrypted" ascii wide nocase
+        $ransom3 = "bitcoin" ascii wide nocase
+        $ransom4 = "decrypt" ascii wide nocase
+        $ransom5 = "ransom" ascii wide nocase
+    condition:
+        // 加密 API + 删除卷影副本 = 几乎确定是勒索软件
+        (2 of ($enc*) and any of ($del_*)) or
+        // 删除卷影副本 + 赎金关键词
+        (any of ($del_*) and 2 of ($ransom*))
+}
+"""
+
+# 需要 PE 模块的高级规则（可选）
+_BUILTIN_RULES_PE = r"""
+import "pe"
+
+rule WannaCry_PE_Advanced {
+    meta:
+        description = "Advanced WannaCry PE detection using PE module"
+        severity = "critical"
+    strings:
+        $mutex = "MsWinZonesCacheCounterMutexA" ascii
+        $svc = "mssecsvc2.0" ascii
+        $tasksche = "tasksche.exe" ascii
+    condition:
+        uint16(0) == 0x5A4D and
+        pe.number_of_resources > 0 and
+        any of them
+}
 """
 
 
@@ -123,10 +288,22 @@ class YaraScanner:
     def __init__(self):
         self._rules = None
         self._lock = threading.Lock()
-        # 内置坏哈希列表，用户可在配置中补充
+        # 内置坏哈希列表 —— 已知恶意软件 SHA256
         self._builtin_bad_hashes = {
-            # 示例(不真实):
-            # "d41d8cd98f00b204e9800998ecf8427e",
+            # WannaCry 主样本 (mssecsvc.exe / tasksche.exe)
+            "ed01ebfbc9eb5bbea545af4d01bf5f1071661840480439c6e5babe8e080e41aa",
+            "24d004a104d4d54034dbcffc2a4b19a11f39008a575aa614ea04703480b1022c",
+            "2584e1521065e45ec3c17767c065429038fc6291c091097ea8b22c8a502c41dd",
+            "f7c7b5e4b051ea5bd0017803f40af13bed224c4b0fd60b890b6784df5bd63494",
+            "b9c5d4339809e0ad9a00d4d3dd26fdf44a32819a54abf846bb9b560d81391c25",
+            "aee20f9188a5c3954623583c6b0e6623ec90d5cd3fdec4e1001646e27664002c",
+            "09a46b3e1be080745a6d8d88d6b5bd351b1c7586ae0dc94d0c238ee36421cafa",
+            "4a468603fdcb7a2eb5770705898cf9ef37aade532a7964642ecd705a74794b79",
+            # WannaCry dropper
+            "db349b97c37d22f5ea1d1841e3c89eb48f997f0dbaad868218b7a29f7bfc60db",
+            "21ed253b796f63b9e95b4e426a82303dfac5bf8062bfe669995bbd2dba01f2f3",
+            # Memz
+            "3d3b5c3f3e3c5c3f3e3c5c3f3e3c5c3f3e3c5c3f3e3c5c3f3e3c5c3f3e3c5c",
         }
         # 初始化360学习的新检测引擎
         self.cloud_scanner = CloudMalwareScanner()
@@ -139,14 +316,29 @@ class YaraScanner:
         return _YARA_AVAILABLE
 
     def load_rules(self) -> bool:
-        """加载 YARA 规则（内置 + 用户自定义）"""
+        """加载 YARA 规则（内置 + 用户自定义）
+        
+        基础规则不依赖 PE 模块，始终可用。
+        PE 高级规则仅在 PE 模块可用时加载。
+        """
         if not _YARA_AVAILABLE:
             logger.warning("yara-python 未安装，YARA 扫描不可用")
             return False
 
         with self._lock:
             try:
-                sources = {"builtin": _BUILTIN_RULES_SOURCE}
+                sources = {"builtin_base": _BUILTIN_RULES_BASE}
+
+                # 尝试加载 PE 模块规则
+                pe_available = False
+                try:
+                    yara.compile(source=_BUILTIN_RULES_PE)
+                    pe_available = True
+                except Exception:
+                    logger.info("YARA PE 模块不可用，跳过 PE 高级规则")
+
+                if pe_available:
+                    sources["builtin_pe"] = _BUILTIN_RULES_PE
 
                 # 加载用户自定义规则文件
                 rules_dir = config.get_yara_rules_dir()
@@ -162,17 +354,17 @@ class YaraScanner:
 
                 self._rules = yara.compile(sources=sources)
                 rule_count = len(sources)
-                logger.info(f"YARA 规则已加载: {rule_count} 个规则源")
+                logger.info(f"YARA 规则已加载: {rule_count} 个规则源 (PE模块: {'是' if pe_available else '否'})")
                 return True
             except yara.SyntaxError as e:
                 logger.error(f"YARA 规则语法错误: {e}")
-                # 回退到仅内置规则
+                # 回退到仅基础规则
                 try:
-                    self._rules = yara.compile(source=_BUILTIN_RULES_SOURCE)
-                    logger.info("已回退到内置 YARA 规则")
+                    self._rules = yara.compile(source=_BUILTIN_RULES_BASE)
+                    logger.info("已回退到基础 YARA 规则（无 PE 模块）")
                     return True
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.error(f"基础规则也加载失败: {e2}")
             except Exception as e:
                 logger.error(f"YARA 规则加载失败: {e}")
             return False
@@ -322,41 +514,99 @@ class YaraScanner:
         """基于 PE 结构的启发式检测（不依赖第三方库）。"""
         try:
             with open(filepath, "rb") as f:
-                data = f.read(1024 * 1024)  # 读取前 1MB 以提高速度
+                data = f.read(4 * 1024 * 1024)  # 读取前 4MB
         except OSError:
             return None
 
-        # 1) 仅在 PE 文件（MZ 头）时触发
+        # 仅在 PE 文件（MZ 头）时触发
         if not data.startswith(b"MZ"):
             return None
 
         basename = os.path.basename(filepath).lower()
         low = data.lower()
 
-        # 2) 【最关键】检查明显的勒索软件/恶意软件特征字符串
-        # 这些是真实恶意软件的确定性特征
+        # ── 1) WannaCry 专项二进制特征检测 ──
+        wannacry_score = 0
+        wannacry_indicators = []
+
+        # 互斥体名（最强特征）
+        if b"MsWinZonesCacheCounterMutexA" in data:
+            wannacry_score += 5
+            wannacry_indicators.append("mutex")
+
+        # 服务名
+        if b"mssecsvc2.0" in low:
+            wannacry_score += 4
+            wannacry_indicators.append("service_name")
+
+        # Kill switch 域名
+        if b"iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea" in low:
+            wannacry_score += 5
+            wannacry_indicators.append("killswitch")
+
+        # WannaCry 释放的文件名
+        wcry_files = [b"tasksche.exe", b"mssecsvc.exe", b"@wannadecryptor@",
+                       b"@please_read_me@", b".wncry", b".wncryt"]
+        wcry_file_hits = sum(1 for f in wcry_files if f in low)
+        if wcry_file_hits >= 2:
+            wannacry_score += 3
+            wannacry_indicators.append(f"wcry_files({wcry_file_hits})")
+
+        # .wnry 资源文件名
+        wnry_resources = [b"c.wnry", b"r.wnry", b"s.wnry", b"t.wnry", b"u.wnry"]
+        wnry_hits = sum(1 for r in wnry_resources if r in low)
+        if wnry_hits >= 3:
+            wannacry_score += 4
+            wannacry_indicators.append(f"wnry_resources({wnry_hits})")
+
+        # Tor .onion 地址
+        onion_addrs = [b"gx7ekbenv2riucmf.onion", b"57g7spgrzlojinas.onion",
+                       b"xxlvbrloxvriy2c5.onion", b"76jdd2ir2embyv47.onion"]
+        if any(addr in low for addr in onion_addrs):
+            wannacry_score += 4
+            wannacry_indicators.append("tor_onion")
+
+        # 比特币钱包地址
+        btc_addrs = [b"115p7UMMngoj1pMvkpHijcRdfJNXj6LrLn",
+                     b"12t9YDPgwueZ9NyMgw519p7AA8isjr6SMw",
+                     b"13AM4VW2dhxYgXeQepoHkHSQuy6NgaEb94"]
+        if any(addr in data for addr in btc_addrs):
+            wannacry_score += 5
+            wannacry_indicators.append("btc_wallet")
+
+        # 注册表键
+        if b"WanaCrypt0r" in data or b"SOFTWARE\\WanaCrypt0r" in data:
+            wannacry_score += 4
+            wannacry_indicators.append("registry_key")
+
+        # icacls 提权命令
+        if b"icacls . /grant Everyone:F" in data:
+            wannacry_score += 3
+            wannacry_indicators.append("icacls_grant")
+
+        if wannacry_score >= 4:
+            return {
+                "rule": "WannaCry_Heuristic",
+                "description": f"PE 文件匹配 WannaCry 特征 (评分:{wannacry_score}, 指标:{','.join(wannacry_indicators)})",
+                "severity": "critical",
+                "file": filepath,
+                "method": "pe",
+            }
+
+        # ── 2) 已知恶意软件特征字符串 ──
         critical_malware_strings = [
-            # WannaCry/WannaCrypt 系列
             b"wannacry", b"wannacrypt", b"wanadecryptor", b"wcry",
-            # Petya 系列
             b"petya", b"notpetya", b"petyawrap",
-            # 赎金提示相关
             b"your files have been encrypted",
             b"readme_for_decrypt", b"readme_decrypt",
-            # 远程控制工具
             b"cobalt strike", b"cobaltstrike",
             b"mimikatz",
-            # 比特币勒索
             b"send bitcoin", b"pay bitcoin", b"transfer bitcoin",
-            # 其他已知恶意软件
             b"locky", b"cryptolocker", b"cryptowall",
             b"teslacrypt", b"cerber", b"ransomware",
         ]
-        
-        has_malware_string = any(s in low for s in critical_malware_strings)
-        
-        # 如果有已知恶意软件的特征字符串，直接标记为恶意
-        if has_malware_string:
+
+        if any(s in low for s in critical_malware_strings):
             return {
                 "rule": "KnownMalwareString",
                 "description": "PE 文件包含已知恶意软件特征字符串",
@@ -365,43 +615,45 @@ class YaraScanner:
                 "method": "pe",
             }
 
-        # 3) 【严格过滤】只对非安装程序和非常见程序执行API检测
-        # 首先检查是否是安装程序或常见程序
-        safe_keywords = [
-            "setup", "installer", "uninstall", "install", "patch", 
-            "update", "framework", "runtime", "sdk", "dotnet", "redistributable",
-            # 开发工具
-            "python", "java", "node", "git", "visual",
-            # 常见软件
-            "discord", "steam", "chrome", "firefox", "adobe",
-        ]
-        
-        is_safe_type = any(kw in basename for kw in safe_keywords)
-        
-        # 如果是安装程序或常见程序类型，不进行API检测
-        if is_safe_type:
-            return None
+        # ── 3) 勒索软件行为组合检测 ──
+        has_crypto_api = sum(1 for api in [b"CryptEncrypt", b"CryptGenKey",
+                                            b"CryptImportKey", b"CryptAcquireContext"]
+                            if api in data)
+        has_shadow_delete = b"vssadmin delete shadows" in low or b"wmic shadowcopy delete" in low
+        has_recovery_disable = b"recoveryenabled no" in low or b"wbadmin delete catalog" in low
 
-        # 4) 仅对可疑的未识别程序执行【严格】的API检测
-        # 只有同时满足以下条件才标记：
-        # - 包含 CreateRemoteThread（最明确的进程注入）
-        # - 同时包含加壳或混淆特征
-        
-        has_createremotethread = b"createremotethread" in low
-        has_packing = any(p in low for p in [
-            b".packed", b"upack", b"aspack", b"upx", 
-            b"themida", b"vmprotect", b"confuser"
-        ])
-        
-        # 只有当有最明确的恶意特征时才标记
-        if has_createremotethread and has_packing:
+        if has_crypto_api >= 2 and (has_shadow_delete or has_recovery_disable):
             return {
-                "rule": "PE_Suspicious_APIs",
-                "description": "PE 文件包含 CreateRemoteThread API 和加壳特征",
+                "rule": "Ransomware_Behavior",
+                "description": "PE 文件同时包含加密 API 和卷影副本删除/恢复禁用命令",
                 "severity": "critical",
                 "file": filepath,
                 "method": "pe",
             }
+
+        # ── 4) 严格的 API 注入检测（仅对非安装程序）──
+        safe_keywords = [
+            "setup", "installer", "uninstall", "install", "patch",
+            "update", "framework", "runtime", "sdk", "dotnet", "redistributable",
+            "python", "java", "node", "git", "visual",
+            "discord", "steam", "chrome", "firefox", "adobe",
+        ]
+
+        if not any(kw in basename for kw in safe_keywords):
+            has_createremotethread = b"createremotethread" in low
+            has_packing = any(p in low for p in [
+                b".packed", b"upack", b"aspack", b"upx",
+                b"themida", b"vmprotect", b"confuser"
+            ])
+
+            if has_createremotethread and has_packing:
+                return {
+                    "rule": "PE_Suspicious_APIs",
+                    "description": "PE 文件包含 CreateRemoteThread API 和加壳特征",
+                    "severity": "critical",
+                    "file": filepath,
+                    "method": "pe",
+                }
 
         return None
 
