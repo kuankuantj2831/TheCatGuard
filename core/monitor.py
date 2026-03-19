@@ -1,6 +1,9 @@
 import threading
 import time
 import winreg
+import ctypes
+import ctypes.wintypes
+import hashlib
 import psutil
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -258,9 +261,11 @@ class ProcessMonitor:
 
 
 class RegistryMonitor:
+    """注册表主动防御：监控关键注册表位置，检测篡改并自动回滚"""
     def __init__(self):
         self.running = False
         self.thread = None
+        self.protect_mode = True  # True = 自动回滚，False = 仅告警
         # 扩展监控范围：覆盖主要自启动注册表位置
         self.watched_keys = [
             # Run / RunOnce
@@ -275,15 +280,23 @@ class RegistryMonitor:
             # AppInit_DLLs 注入
             (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows NT\CurrentVersion\Windows"),
         ]
+        # 关键系统值白名单 — 这些值被修改时必须回滚
+        self._critical_values = {
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon"): {
+                "Shell": "explorer.exe",
+                "Userinit": r"C:\Windows\system32\userinit.exe,",
+            },
+        }
         # (hkey, path) -> {name: (data, type)} — 同时记录值名和值数据
         self.known_values = {}
 
     def start(self):
         self.running = True
+        self.protect_mode = config.get("registry_protect", True)
         self._snapshot()
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
-        logger.info("注册表监控已启动")
+        logger.info(f"注册表监控已启动 [保护模式: {'开启' if self.protect_mode else '关闭'}]")
 
     def stop(self):
         self.running = False
@@ -315,6 +328,45 @@ class RegistryMonitor:
     def _hive_name(self, hkey):
         return "HKCU" if hkey == winreg.HKEY_CURRENT_USER else "HKLM"
 
+    def _rollback_value(self, hkey, path, name, data, vtype):
+        """回滚注册表值到之前的状态"""
+        try:
+            key = winreg.OpenKey(hkey, path, 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, name, 0, vtype, data)
+            winreg.CloseKey(key)
+            hive = self._hive_name(hkey)
+            logger.warning(
+                f"DEFENSE: 注册表已回滚: [{hive}] {path} -> {name} = {data!r}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"DEFENSE: 注册表回滚失败: {e}")
+            return False
+
+    def _delete_value(self, hkey, path, name):
+        """删除未授权的注册表新增值"""
+        try:
+            key = winreg.OpenKey(hkey, path, 0, winreg.KEY_SET_VALUE)
+            winreg.DeleteValue(key, name)
+            winreg.CloseKey(key)
+            hive = self._hive_name(hkey)
+            logger.warning(
+                f"DEFENSE: 已删除未授权注册表项: [{hive}] {path} -> {name}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"DEFENSE: 删除注册表项失败: {e}")
+            return False
+
+    def _is_critical_tamper(self, hkey, path, name, new_data):
+        """检查是否为关键系统值被篡改"""
+        critical = self._critical_values.get((hkey, path), {})
+        if name in critical:
+            expected = critical[name]
+            if isinstance(new_data, str):
+                return new_data.lower().strip() != expected.lower().strip()
+        return False
+
     def _monitor_loop(self):
         interval = config.get("registry_poll_interval", 2)
         while self.running:
@@ -333,6 +385,10 @@ class RegistryMonitor:
                         f"SECURITY ALERT: 注册表新增启动项: [{hive}] {path} -> "
                         f"{name} = {data!r}"
                     )
+                    # 保护模式：自动删除未授权的新增启动项
+                    if self.protect_mode:
+                        self._delete_value(hkey, path, name)
+                        current = self._get_values(hkey, path)  # 刷新
 
                 # 检测值被篡改（名称相同但数据变了）
                 for name in current.keys() & old.keys():
@@ -341,6 +397,17 @@ class RegistryMonitor:
                             f"SECURITY ALERT: 注册表启动项被修改: [{hive}] {path} -> "
                             f"{name}: {old[name][0]!r} => {current[name][0]!r}"
                         )
+                        # 关键系统值被篡改 → 强制回滚
+                        if self._is_critical_tamper(hkey, path, name, current[name][0]):
+                            logger.critical(
+                                f"DEFENSE: 关键系统注册表被篡改！正在回滚 {name}"
+                            )
+                            self._rollback_value(hkey, path, name, old[name][0], old[name][1])
+                            current = self._get_values(hkey, path)
+                        elif self.protect_mode:
+                            # 普通启动项被修改 → 回滚
+                            self._rollback_value(hkey, path, name, old[name][0], old[name][1])
+                            current = self._get_values(hkey, path)
 
                 # 检测被删除的键值
                 for name in old.keys() - current.keys():
@@ -569,6 +636,410 @@ class NetworkMonitor:
             time.sleep(config.get("network_poll_interval", 3))
 
 
+# ═══════════════════════════════════════════════════════════
+#  MBR 保护模块 — 备份 MBR 并定期校验，被篡改时自动恢复
+# ═══════════════════════════════════════════════════════════
+
+class MBRProtector:
+    """MBR（主引导记录）主动防御
+
+    原理：
+    1. 启动时读取磁盘前 512 字节（MBR）并保存为基线
+    2. 定期重新读取 MBR 与基线比对哈希
+    3. 如果哈希不一致 → MBR 被篡改 → 自动从备份恢复
+    需要管理员/SYSTEM 权限才能读写 PhysicalDrive。
+    """
+
+    MBR_SIZE = 512  # 标准 MBR 大小
+    BACKUP_DIR = os.path.join(os.environ.get("APPDATA", ""), "TheCatGuard", "mbr_backup")
+
+    def __init__(self):
+        self.running = False
+        self.thread = None
+        self._baseline_hash = None
+        self._baseline_data = None
+        self._drive_path = r"\\.\PhysicalDrive0"
+
+    def start(self):
+        if not is_admin():
+            logger.warning("MBR 保护需要管理员权限，跳过")
+            return
+        self.running = True
+        # 建立基线
+        if self._init_baseline():
+            self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self.thread.start()
+            logger.info("MBR 保护已启动 [实时校验模式]")
+        else:
+            logger.error("MBR 保护启动失败：无法读取 MBR 基线")
+            self.running = False
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=3.0)
+
+    def _read_mbr(self) -> bytes | None:
+        """通过 Windows API 读取 MBR（前 512 字节）"""
+        try:
+            GENERIC_READ = 0x80000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            OPEN_EXISTING = 3
+
+            handle = ctypes.windll.kernel32.CreateFileW(
+                self._drive_path,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if handle == -1 or handle == ctypes.wintypes.HANDLE(-1).value:
+                err = ctypes.get_last_error() or ctypes.windll.kernel32.GetLastError()
+                logger.error(f"MBR: 无法打开 {self._drive_path}，错误码: {err}")
+                return None
+
+            try:
+                buf = ctypes.create_string_buffer(self.MBR_SIZE)
+                bytes_read = ctypes.wintypes.DWORD(0)
+                ok = ctypes.windll.kernel32.ReadFile(
+                    handle, buf, self.MBR_SIZE, ctypes.byref(bytes_read), None
+                )
+                if ok and bytes_read.value == self.MBR_SIZE:
+                    return buf.raw
+                else:
+                    logger.error(f"MBR: ReadFile 失败，读取 {bytes_read.value} 字节")
+                    return None
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception as e:
+            logger.error(f"MBR: 读取异常: {e}")
+            return None
+
+    def _write_mbr(self, data: bytes) -> bool:
+        """通过 Windows API 写入 MBR（恢复用）"""
+        if len(data) != self.MBR_SIZE:
+            return False
+        try:
+            GENERIC_WRITE = 0x40000000
+            FILE_SHARE_READ = 0x00000001
+            FILE_SHARE_WRITE = 0x00000002
+            OPEN_EXISTING = 3
+
+            handle = ctypes.windll.kernel32.CreateFileW(
+                self._drive_path,
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if handle == -1 or handle == ctypes.wintypes.HANDLE(-1).value:
+                return False
+
+            try:
+                bytes_written = ctypes.wintypes.DWORD(0)
+                ok = ctypes.windll.kernel32.WriteFile(
+                    handle, data, self.MBR_SIZE, ctypes.byref(bytes_written), None
+                )
+                return bool(ok and bytes_written.value == self.MBR_SIZE)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception as e:
+            logger.error(f"MBR: 写入异常: {e}")
+            return False
+
+    def _hash_mbr(self, data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _init_baseline(self) -> bool:
+        """读取当前 MBR 作为基线，并保存备份文件"""
+        data = self._read_mbr()
+        if not data:
+            return False
+
+        self._baseline_data = data
+        self._baseline_hash = self._hash_mbr(data)
+
+        # 保存到磁盘备份
+        try:
+            os.makedirs(self.BACKUP_DIR, exist_ok=True)
+            backup_path = os.path.join(self.BACKUP_DIR, "mbr_baseline.bin")
+            hash_path = os.path.join(self.BACKUP_DIR, "mbr_baseline.sha256")
+
+            # 只在首次或哈希不同时写入
+            if not os.path.exists(backup_path):
+                with open(backup_path, "wb") as f:
+                    f.write(data)
+                with open(hash_path, "w") as f:
+                    f.write(self._baseline_hash)
+                logger.info(f"MBR 基线已保存: {self._baseline_hash[:16]}...")
+            else:
+                # 验证磁盘备份与当前一致
+                with open(backup_path, "rb") as f:
+                    saved = f.read()
+                if self._hash_mbr(saved) != self._baseline_hash:
+                    logger.warning("MBR 备份文件与当前 MBR 不一致，更新备份")
+                    with open(backup_path, "wb") as f:
+                        f.write(data)
+                    with open(hash_path, "w") as f:
+                        f.write(self._baseline_hash)
+        except OSError as e:
+            logger.warning(f"MBR 备份保存失败: {e}")
+
+        logger.info(f"MBR 基线哈希: {self._baseline_hash[:16]}...")
+        return True
+
+    def _restore_mbr(self) -> bool:
+        """从基线恢复 MBR"""
+        if not self._baseline_data:
+            # 尝试从磁盘备份恢复
+            backup_path = os.path.join(self.BACKUP_DIR, "mbr_baseline.bin")
+            if os.path.exists(backup_path):
+                try:
+                    with open(backup_path, "rb") as f:
+                        self._baseline_data = f.read()
+                except OSError:
+                    return False
+            else:
+                return False
+
+        logger.critical("DEFENSE: 正在恢复 MBR...")
+        if self._write_mbr(self._baseline_data):
+            logger.critical("DEFENSE: MBR 已成功恢复！")
+            return True
+        else:
+            logger.critical("DEFENSE: MBR 恢复失败！系统可能处于危险状态！")
+            return False
+
+    def _monitor_loop(self):
+        interval = config.get("mbr_check_interval", 5)
+        while self.running:
+            time.sleep(interval)
+            if not self.running:
+                break
+
+            current = self._read_mbr()
+            if not current:
+                continue
+
+            current_hash = self._hash_mbr(current)
+            if current_hash != self._baseline_hash:
+                logger.critical(
+                    f"SECURITY ALERT: MBR 被篡改！"
+                    f"基线: {self._baseline_hash[:16]}... "
+                    f"当前: {current_hash[:16]}..."
+                )
+                # 自动恢复
+                if self._restore_mbr():
+                    # 验证恢复结果
+                    verify = self._read_mbr()
+                    if verify and self._hash_mbr(verify) == self._baseline_hash:
+                        logger.critical("DEFENSE: MBR 恢复验证通过")
+                    else:
+                        logger.critical("DEFENSE: MBR 恢复后验证失败！")
+
+
+# ═══════════════════════════════════════════════════════════
+#  系统文件完整性保护 — 监控关键系统文件哈希
+# ═══════════════════════════════════════════════════════════
+
+class SystemFileProtector:
+    """系统关键文件完整性监控
+
+    原理：
+    1. 启动时对关键系统文件计算 SHA256 哈希作为基线
+    2. 定期重新计算哈希并与基线比对
+    3. 发现篡改时告警，并可调用 sfc /scannow 修复
+    """
+
+    # 关键系统文件列表
+    CRITICAL_FILES = [
+        # 系统核心
+        r"C:\Windows\System32\ntoskrnl.exe",
+        r"C:\Windows\System32\hal.dll",
+        r"C:\Windows\System32\kernel32.dll",
+        r"C:\Windows\System32\ntdll.dll",
+        # 登录/认证
+        r"C:\Windows\System32\winlogon.exe",
+        r"C:\Windows\System32\lsass.exe",
+        r"C:\Windows\System32\userinit.exe",
+        r"C:\Windows\System32\csrss.exe",
+        # 服务管理
+        r"C:\Windows\System32\services.exe",
+        r"C:\Windows\System32\svchost.exe",
+        # 网络
+        r"C:\Windows\System32\drivers\tcpip.sys",
+        r"C:\Windows\System32\drivers\afd.sys",
+        # 安全
+        r"C:\Windows\System32\bcryptprimitives.dll",
+        r"C:\Windows\System32\crypt32.dll",
+        # 引导
+        r"C:\Windows\System32\winload.exe",
+        r"C:\Windows\System32\bootmgr",
+        # hosts 文件
+        r"C:\Windows\System32\drivers\etc\hosts",
+        # 命令行
+        r"C:\Windows\System32\cmd.exe",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    ]
+
+    BASELINE_DIR = os.path.join(os.environ.get("APPDATA", ""), "TheCatGuard", "sysfile_baseline")
+
+    def __init__(self):
+        self.running = False
+        self.thread = None
+        self._baseline = {}  # filepath -> sha256
+        self._sfc_running = False
+
+    def start(self):
+        self.running = True
+        self._init_baseline()
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        logger.info(f"系统文件完整性保护已启动 [监控 {len(self._baseline)} 个文件]")
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=3.0)
+
+    def _compute_hash(self, filepath: str) -> str | None:
+        """计算文件 SHA256"""
+        try:
+            h = hashlib.sha256()
+            with open(filepath, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+        except (OSError, PermissionError):
+            return None
+
+    def _init_baseline(self):
+        """建立系统文件哈希基线"""
+        os.makedirs(self.BASELINE_DIR, exist_ok=True)
+        baseline_file = os.path.join(self.BASELINE_DIR, "baseline.txt")
+
+        # 尝试加载已有基线
+        saved_baseline = {}
+        if os.path.exists(baseline_file):
+            try:
+                with open(baseline_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if "|" in line:
+                            h, p = line.split("|", 1)
+                            saved_baseline[p] = h
+            except OSError:
+                pass
+
+        # 计算当前哈希
+        for filepath in self.CRITICAL_FILES:
+            if not os.path.exists(filepath):
+                continue
+            current_hash = self._compute_hash(filepath)
+            if not current_hash:
+                continue
+
+            if filepath in saved_baseline:
+                # 使用已保存的基线（首次启动时的干净状态）
+                self._baseline[filepath] = saved_baseline[filepath]
+            else:
+                # 新文件，当前哈希作为基线
+                self._baseline[filepath] = current_hash
+
+        # 保存基线
+        self._save_baseline()
+        logger.info(f"系统文件基线已建立: {len(self._baseline)} 个文件")
+
+    def _save_baseline(self):
+        """保存基线到磁盘"""
+        try:
+            baseline_file = os.path.join(self.BASELINE_DIR, "baseline.txt")
+            with open(baseline_file, "w") as f:
+                for filepath, h in sorted(self._baseline.items()):
+                    f.write(f"{h}|{filepath}\n")
+        except OSError as e:
+            logger.warning(f"基线保存失败: {e}")
+
+    def _run_sfc(self):
+        """运行 sfc /scannow 修复系统文件"""
+        if self._sfc_running or not is_admin():
+            return
+        self._sfc_running = True
+        try:
+            import subprocess
+            logger.critical("DEFENSE: 正在运行 sfc /scannow 修复系统文件...")
+            result = subprocess.run(
+                ["sfc", "/scannow"],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode == 0:
+                logger.info("DEFENSE: sfc /scannow 完成")
+            else:
+                logger.warning(f"DEFENSE: sfc 返回码 {result.returncode}")
+        except Exception as e:
+            logger.error(f"DEFENSE: sfc 运行失败: {e}")
+        finally:
+            self._sfc_running = False
+
+    def _monitor_loop(self):
+        interval = config.get("sysfile_check_interval", 30)
+        while self.running:
+            time.sleep(interval)
+            if not self.running:
+                break
+
+            tampered = []
+            for filepath, baseline_hash in self._baseline.items():
+                if not self.running:
+                    break
+                if not os.path.exists(filepath):
+                    logger.critical(
+                        f"SECURITY ALERT: 系统文件被删除！{filepath}"
+                    )
+                    tampered.append(filepath)
+                    continue
+
+                current_hash = self._compute_hash(filepath)
+                if not current_hash:
+                    continue
+
+                if current_hash != baseline_hash:
+                    logger.critical(
+                        f"SECURITY ALERT: 系统文件被篡改！{filepath} "
+                        f"(基线: {baseline_hash[:16]}... 当前: {current_hash[:16]}...)"
+                    )
+                    tampered.append(filepath)
+
+            if tampered:
+                logger.critical(
+                    f"DEFENSE: 检测到 {len(tampered)} 个系统文件被篡改，"
+                    f"启动 SFC 修复..."
+                )
+                # 在后台线程运行 SFC
+                sfc_thread = threading.Thread(target=self._run_sfc, daemon=True)
+                sfc_thread.start()
+
+    def refresh_baseline(self):
+        """手动刷新基线（系统更新后调用）"""
+        self._baseline.clear()
+        for filepath in self.CRITICAL_FILES:
+            if not os.path.exists(filepath):
+                continue
+            h = self._compute_hash(filepath)
+            if h:
+                self._baseline[filepath] = h
+        self._save_baseline()
+        logger.info(f"系统文件基线已刷新: {len(self._baseline)} 个文件")
+
+
 class MonitorManager:
     """Manages all monitors centrally."""
     def __init__(self):
@@ -577,6 +1048,8 @@ class MonitorManager:
         self.registry_monitor = RegistryMonitor()
         self.usb_monitor = USBMonitor()
         self.network_monitor = NetworkMonitor()
+        self.mbr_protector = MBRProtector()
+        self.sysfile_protector = SystemFileProtector()
         self._running = False
 
     def start_all(self):
@@ -590,6 +1063,8 @@ class MonitorManager:
             ("registry", self.registry_monitor),
             ("usb", self.usb_monitor),
             ("network", self.network_monitor),
+            ("mbr", self.mbr_protector),
+            ("sysfile", self.sysfile_protector),
         ]
         for name, mon in monitors:
             try:
@@ -609,6 +1084,8 @@ class MonitorManager:
             ("usb", self.usb_monitor),
             ("file", self.file_monitor),
             ("network", self.network_monitor),
+            ("mbr", self.mbr_protector),
+            ("sysfile", self.sysfile_protector),
         ]
         for name, mon in monitors:
             try:
