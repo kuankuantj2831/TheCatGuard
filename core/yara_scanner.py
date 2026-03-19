@@ -134,83 +134,89 @@ rule WannaCry_Mutex_And_Markers {
         any of them
 }
 
-// 7) WannaCry 加密相关特征（RSA 公钥标记 + .WNCRY 扩展名）
+// 7) WannaCry 加密相关特征（高置信度组合）
+//    去掉通用 CryptoAPI 名称和 "msg" 等短字符串，只保留 WannaCry 专有标记
 rule WannaCry_Encryption_Artifacts {
     meta:
         description = "Detects WannaCry encryption artifacts and ransom file patterns"
         severity = "critical"
     strings:
-        // .WNCRY 加密文件扩展名
+        // .WNCRY 加密文件扩展名（WannaCry 专有）
         $wncry_ext = ".WNCRY" ascii wide
         $wncryt = ".WNCRYT" ascii wide
-        // WannaCry 内嵌的比特币钱包地址
+        // WannaCry 内嵌的比特币钱包地址（唯一标识）
         $btc1 = "115p7UMMngoj1pMvkpHijcRdfJNXj6LrLn" ascii
         $btc2 = "12t9YDPgwueZ9NyMgw519p7AA8isjr6SMw" ascii
         $btc3 = "13AM4VW2dhxYgXeQepoHkHSQuy6NgaEb94" ascii
-        // WannaCry 的 RSA 公钥导入标记
-        $rsa_import = "CryptImportKey" ascii
-        // WannaCry 加密使用的 AES + RSA 组合
-        $crypt_acquire = "CryptAcquireContextA" ascii
-        $crypt_encrypt = "CryptEncrypt" ascii
-        // 资源中的 .wnry 文件
+        // WannaCry 资源中的 .wnry 文件（专有命名）
         $res_c = "c.wnry" ascii wide
         $res_r = "r.wnry" ascii wide
         $res_s = "s.wnry" ascii wide
         $res_t = "t.wnry" ascii wide
         $res_u = "u.wnry" ascii wide
-        $res_msg = "msg" ascii wide
     condition:
-        // .WNCRY 扩展名 + 任何其他标记
-        ($wncry_ext or $wncryt) and any of ($btc*, $rsa_import, $crypt_*, $res_*) or
-        // 或者同时出现多个 .wnry 资源文件名
+        // 比特币钱包地址（极高置信度）
+        any of ($btc*) or
+        // 同时出现 3 个以上 .wnry 资源文件名
         3 of ($res_*) or
-        // 或者出现比特币钱包地址
-        any of ($btc*)
+        // .WNCRY 扩展名 + 任何 .wnry 资源
+        ($wncry_ext or $wncryt) and any of ($res_*)
 }
 
 // 8) WannaCry SMB 传播特征（EternalBlue 利用）
+//    必须同时匹配 EternalBlue 特征字节 + WannaCry 专有标记，避免误报正常 SMB 程序
 rule WannaCry_SMB_Exploit {
     meta:
         description = "Detects WannaCry SMB/EternalBlue exploitation patterns"
         severity = "critical"
     strings:
-        // EternalBlue SMB exploit 特征字节
-        $smb_sig1 = { FF 53 4D 42 72 }  // SMB negotiate
-        $smb_sig2 = { FF 53 4D 42 25 }  // SMB trans
-        // DoublePulsar 后门特征
-        $doublepulsar1 = { 00 00 00 00 00 00 00 00 00 00 00 45 }
-        // WannaCry 扫描 445 端口的代码特征
-        $port445_1 = { C7 44 24 ?? BD 01 00 00 }  // mov [esp+xx], 445
-        $port445_2 = "445" ascii
-        // WannaCry 的 SMB 传播函数中的特征字符串
-        $ipc_share = "IPC$" ascii wide
+        // EternalBlue exploit 中的特征操作码序列（非常规 SMB 不会包含）
+        $eb_shellcode1 = { 31 C9 41 E2 01 C3 }  // xor ecx,ecx; loop $+3; ret
+        $eb_shellcode2 = { E8 18 00 00 00 57 00 69 00 6E 00 45 00 78 00 65 00 63 00 }  // call + "WinExec" wide
+        // WannaCry 特有的 SMB 传播函数中的组合
         $smb_pipe = "\\\\%s\\IPC$" ascii
+        $svc_name = "mssecsvc2.0" ascii
+        // WannaCry 扫描 445 端口的机器码
+        $port445_asm = { C7 44 24 ?? BD 01 00 00 }  // mov [esp+xx], 445
+        // WannaCry 的 payload 释放路径
+        $payload_path = "tasksche.exe" ascii
+        $payload_path2 = "mssecsvc.exe" ascii
     condition:
-        2 of them
+        // 必须有 EternalBlue shellcode 或 WannaCry 专有标记组合
+        any of ($eb_shellcode*) or
+        ($smb_pipe and ($svc_name or $payload_path or $payload_path2)) or
+        ($port445_asm and any of ($svc_name, $payload_path, $payload_path2))
 }
 
-// 9) WannaCry PE 文件特征（需要 MZ 头）
+// 9) WannaCry PE 文件特征（需要 MZ 头 + 高置信度组合）
+//    去掉 "cmd.exe /c"、"attrib +h" 等通用字符串，只保留 WannaCry 专有标记
 rule WannaCry_PE_Indicators {
     meta:
         description = "Detects WannaCry PE binary indicators"
         severity = "critical"
     strings:
-        // WannaCry 主程序中的特征字符串组合
-        $s1 = "tasksche.exe" ascii wide nocase
-        $s2 = "mssecsvc.exe" ascii wide nocase
-        $s3 = "attrib +h" ascii nocase
-        $s4 = "icacls . /grant Everyone:F /T /C /Q" ascii nocase
-        $s5 = "cmd.exe /c" ascii nocase
-        // WannaCry 的 Tor 客户端相关
+        // WannaCry 专有文件名（不会出现在正常程序中）
+        $wcry1 = "tasksche.exe" ascii wide nocase
+        $wcry2 = "mssecsvc.exe" ascii wide nocase
+        // WannaCry 专有的 icacls 完整命令（含 Everyone:F）
+        $icacls = "icacls . /grant Everyone:F /T /C /Q" ascii nocase
+        // WannaCry 的 Tor .onion 地址（唯一标识）
         $tor1 = "gx7ekbenv2riucmf.onion" ascii
         $tor2 = "57g7spgrzlojinas.onion" ascii
         $tor3 = "xxlvbrloxvriy2c5.onion" ascii
         $tor4 = "76jdd2ir2embyv47.onion" ascii
-        // WannaCry 的注册表操作
+        // WannaCry 注册表键（专有）
         $reg1 = "SOFTWARE\\WanaCrypt0r" ascii wide nocase
         $reg2 = "WanaCrypt0r" ascii wide nocase
     condition:
-        uint16(0) == 0x5A4D and 2 of them
+        uint16(0) == 0x5A4D and (
+            // 任何 Tor 地址或注册表键 = 高置信度
+            any of ($tor*) or any of ($reg*) or
+            // WannaCry 专有文件名 + icacls 命令
+            ($icacls and any of ($wcry*)) or
+            // 同时出现两个 WannaCry 专有文件名
+            ($wcry1 and $wcry2)
+        )
 }
 
 // 10) Memz 木马检测
