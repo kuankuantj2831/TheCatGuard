@@ -79,14 +79,16 @@ class RealTimeChart(QWidget):
             self.progress_bar.setValue(int(value))
 
 class ThreatStatisticsPanel(QWidget):
-    """威胁统计面板"""
+    """威胁统计面板 — 从真实日志中统计威胁数量"""
     def __init__(self):
         super().__init__()
-        self.threat_counts = defaultdict(int)
+        self._counts = {
+            "病毒文件": 0,
+            "可疑进程": 0,
+            "网络威胁": 0,
+            "系统异常": 0,
+        }
         self.setup_ui()
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_stats)
-        self.update_timer.start(5000)  # 每5秒更新
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -142,15 +144,62 @@ class ThreatStatisticsPanel(QWidget):
         layout.addLayout(stats_layout)
 
     def update_stats(self):
-        """更新统计数据"""
-        # 这里应该从日志或数据库获取真实数据
-        # 暂时使用模拟数据
-        import random
-        for threat_type, label in self.stats_cards.items():
-            current = int(label.text())
-            # 模拟小幅波动
-            new_value = max(0, current + random.randint(-2, 3))
-            label.setText(str(new_value))
+        """刷新 UI 显示（由外部调用 ingest_log 后自动更新）"""
+        for name, label in self.stats_cards.items():
+            label.setText(str(self._counts.get(name, 0)))
+
+    def ingest_log(self, message: str):
+        """从真实日志消息中分类统计威胁
+
+        由 MainWindow 的 log_signal 连接调用。
+        """
+        msg = message.lower()
+
+        # 病毒文件：YARA 匹配、哈希黑名单、恶意软件检测
+        if any(kw in msg for kw in [
+            "yara", "blacklistedhash", "malware", "wannacry",
+            "ransomware", "knownmalware", "pe_suspicious",
+            "virus", "trojan", "病毒",
+        ]):
+            self._counts["病毒文件"] += 1
+
+        # 可疑进程：进程击杀、伪装检测、注入检测
+        elif any(kw in msg for kw in [
+            "击杀可疑进程", "伪装系统进程", "进程注入",
+            "defense: 已击杀", "suspicious process",
+            "terminate", "可疑进程",
+        ]):
+            self._counts["可疑进程"] += 1
+
+        # 网络威胁：可疑网络连接
+        elif any(kw in msg for kw in [
+            "可疑网络连接", "network", "网络威胁",
+            "smb", "端口扫描",
+        ]):
+            self._counts["网络威胁"] += 1
+
+        # 系统异常：注册表篡改、MBR篡改、系统文件篡改、USB
+        elif any(kw in msg for kw in [
+            "注册表", "registry", "mbr", "系统文件被篡改",
+            "系统文件被删除", "autorun.inf", "usb",
+            "启动项", "回滚", "sfc",
+        ]):
+            self._counts["系统异常"] += 1
+
+        else:
+            # 通用 SECURITY ALERT 归入系统异常
+            if "security alert" in msg:
+                self._counts["系统异常"] += 1
+            else:
+                return  # 普通日志不计数
+
+        self.update_stats()
+
+    def reset_counts(self):
+        """重置所有计数"""
+        for key in self._counts:
+            self._counts[key] = 0
+        self.update_stats()
 
 class SystemResourceMonitor(QWidget):
     """系统资源监控面板"""
@@ -403,7 +452,7 @@ class EnhancedDashboard(QWidget):
             item.setForeground(color)
 
     def add_log(self, message):
-        """添加日志消息"""
+        """添加日志消息并更新威胁统计"""
         from PyQt6.QtCore import pyqtSlot
         # 根据日志级别着色
         msg_lower = message.lower()
@@ -422,3 +471,6 @@ class EnhancedDashboard(QWidget):
         self.log_viewer.append(log_text)
         sb = self.log_viewer.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+        # 将日志送入威胁统计面板分类计数
+        self.threat_stats.ingest_log(message)
